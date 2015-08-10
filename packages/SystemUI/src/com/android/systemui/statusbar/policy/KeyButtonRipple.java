@@ -63,7 +63,6 @@ public class KeyButtonRipple extends Drawable {
     private boolean mSupportHardware;
     private final View mTargetView;
 
-
     private final HashSet<Animator> mRunningAnimations = new HashSet<>();
     private final ArrayList<Animator> mTmpArray = new ArrayList<>();
 
