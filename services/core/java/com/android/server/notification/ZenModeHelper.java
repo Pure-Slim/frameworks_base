@@ -39,6 +39,7 @@ import android.os.Message;
 import android.os.UserHandle;
 import android.provider.Settings.Global;
 import android.provider.Settings.Secure;
+import android.provider.Settings.System;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.ZenModeConfig;
 import android.telecom.TelecomManager;
@@ -79,6 +80,8 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
     private AudioManagerInternal mAudioManager;
     private int mPreviousRingerMode = -1;
     private boolean mEffectsSuppressed;
+    private int mPreviousZenMode = -1;
+    private boolean mAllowLights;
 
     public ZenModeHelper(Context context, Looper looper) {
         mContext = context;
@@ -167,12 +170,17 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         }
         switch (mZenMode) {
             case Global.ZEN_MODE_NO_INTERRUPTIONS:
+                if (mConfig.allowAlarms && isAlarm(record)) {
+                    ZenLog.traceNotIntercepted(record, "alarms");
+                    return false;
+                }
                 // #notevenalarms
                 ZenLog.traceIntercepted(record, "none");
                 return true;
             case Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS:
                 if (isAlarm(record)) {
                     // Alarms are always priority
+                    ZenLog.traceNotIntercepted(record, "alarms");
                     return false;
                 }
                 // allow user-prioritized packages through in priority mode
@@ -234,6 +242,7 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
             applyZenToRingerMode();
         }
         applyRestrictions();
+        mPreviousZenMode = mZenMode;
         mHandler.postDispatchOnZenModeChanged();
     }
 
@@ -241,6 +250,15 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         final int newMode = Global.getInt(mContext.getContentResolver(),
                 Global.ZEN_MODE, Global.ZEN_MODE_OFF);
         setZenMode(newMode, "setting");
+    }
+
+    public boolean getAreLightsAllowed() {
+        return mAllowLights;
+    }
+
+    public void readLightsAllowedModeFromSetting() {
+        mAllowLights = System.getIntForUser(mContext.getContentResolver(),
+                System.ALLOW_LIGHTS, 1, UserHandle.USER_CURRENT) == 1;
     }
 
     private void applyRestrictions() {
@@ -255,7 +273,8 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         applyRestrictions(muteCalls, USAGE_NOTIFICATION_RINGTONE);
 
         // alarm restrictions
-        final boolean muteAlarms = mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS;
+        final boolean muteAlarms = mZenMode ==
+                Global.ZEN_MODE_NO_INTERRUPTIONS && !mConfig.allowAlarms;
         applyRestrictions(muteAlarms, USAGE_ALARM);
     }
 
@@ -313,17 +332,22 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         int newRingerModeInternal = ringerModeInternal;
         switch (mZenMode) {
             case Global.ZEN_MODE_NO_INTERRUPTIONS:
+                // remember for restoring
+                mPreviousRingerMode = ringerModeInternal;
                 if (ringerModeInternal != AudioManager.RINGER_MODE_SILENT) {
-                    mPreviousRingerMode = ringerModeInternal;
                     newRingerModeInternal = AudioManager.RINGER_MODE_SILENT;
                 }
                 break;
             case Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS:
             case Global.ZEN_MODE_OFF:
-                if (ringerModeInternal == AudioManager.RINGER_MODE_SILENT) {
-                    newRingerModeInternal = mPreviousRingerMode != -1 ? mPreviousRingerMode
-                            : AudioManager.RINGER_MODE_NORMAL;
-                    mPreviousRingerMode = -1;
+                if (mPreviousZenMode != -1 && mPreviousZenMode ==
+                        Global.ZEN_MODE_NO_INTERRUPTIONS) {
+                    // when coming back from no interruption set back ringer
+                    if (ringerModeInternal == AudioManager.RINGER_MODE_SILENT) {
+                        newRingerModeInternal = mPreviousRingerMode != -1 ? mPreviousRingerMode
+                                : AudioManager.RINGER_MODE_NORMAL;
+                        mPreviousRingerMode = -1;
+                    }
                 }
                 break;
         }
@@ -342,20 +366,26 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         int newZen = -1;
         switch (ringerModeNew) {
             case AudioManager.RINGER_MODE_SILENT:
-                if (isChange) {
+                // if we want silent ringer mode back we must
+                // remove this weired dependency between silent mode
+                // and zen mode.
+                // the only dependency is that no interruptions
+                // implies silent mode. Switching off silent mode
+                // also ends no interruptions
+                /*if (isChange) {
                     if (mZenMode != Global.ZEN_MODE_NO_INTERRUPTIONS) {
                         newZen = Global.ZEN_MODE_NO_INTERRUPTIONS;
                     }
-                }
+                }*/
                 break;
             case AudioManager.RINGER_MODE_VIBRATE:
             case AudioManager.RINGER_MODE_NORMAL:
                 if (isChange && ringerModeOld == AudioManager.RINGER_MODE_SILENT
                         && mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS) {
                     newZen = Global.ZEN_MODE_OFF;
-                } else if (mZenMode != Global.ZEN_MODE_OFF) {
+                } /*else if (mZenMode != Global.ZEN_MODE_OFF) {
                     ringerModeExternalOut = AudioManager.RINGER_MODE_SILENT;
-                }
+                }*/
                 break;
         }
         if (newZen != -1) {
@@ -379,7 +409,7 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         int newZen = -1;
         switch (ringerModeNew) {
             case AudioManager.RINGER_MODE_SILENT:
-                if (isChange) {
+                /*if (isChange) {
                     if (mZenMode == Global.ZEN_MODE_OFF) {
                         newZen = Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
                     }
@@ -387,11 +417,13 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
                             : AudioManager.RINGER_MODE_NORMAL;
                 } else {
                     ringerModeInternalOut = ringerModeInternal;
-                }
+                }*/
                 break;
             case AudioManager.RINGER_MODE_VIBRATE:
             case AudioManager.RINGER_MODE_NORMAL:
-                if (mZenMode != Global.ZEN_MODE_OFF) {
+                // do the same as for the internal case
+                if (isChange && ringerModeOld == AudioManager.RINGER_MODE_SILENT
+                        && mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS) {
                     newZen = Global.ZEN_MODE_OFF;
                 }
                 break;
@@ -501,6 +533,7 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
 
     private class SettingsObserver extends ContentObserver {
         private final Uri ZEN_MODE = Global.getUriFor(Global.ZEN_MODE);
+        private final Uri ALLOW_LIGHTS = System.getUriFor(System.ALLOW_LIGHTS);
 
         public SettingsObserver(Handler handler) {
             super(handler);
@@ -509,6 +542,7 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         public void observe() {
             final ContentResolver resolver = mContext.getContentResolver();
             resolver.registerContentObserver(ZEN_MODE, false /*notifyForDescendents*/, this);
+            resolver.registerContentObserver(ALLOW_LIGHTS, false /*notifyForDescendents*/, this);
             update(null);
         }
 
@@ -520,6 +554,8 @@ public class ZenModeHelper implements AudioManagerInternal.RingerModeDelegate {
         public void update(Uri uri) {
             if (ZEN_MODE.equals(uri)) {
                 readZenModeFromSetting();
+            } else if (ALLOW_LIGHTS.equals(uri)) {
+                readLightsAllowedModeFromSetting();
             }
         }
     }
